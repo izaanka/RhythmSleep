@@ -7,6 +7,8 @@ import csv
 from datetime import datetime, timedelta
 import subprocess
 import os
+import urllib.parse
+import glob
 
 SERIAL_PORT = '/dev/ttyACM0' 
 BAUD_RATE = 115200
@@ -15,13 +17,26 @@ BUFFER_MINUTES = 30
 ALARM_FILE_PATH = "/home/user/alarm.mp3"
 PORT = 8000
 
-# Custom handler to serve HTML and inject CSV data
 class SleepDataServer(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/api/data':
+        parsed_url = urllib.parse.urlparse(self.path)
+        
+        # Endpoint to supply the menu with all available CSV files
+        if parsed_url.path == '/api/files':
+            csv_files = sorted(glob.glob("sleep_log_*.csv"), reverse=True)
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(csv_files).encode('utf-8'))
+            
+        # Endpoint to supply data for a specific requested CSV
+        elif parsed_url.path == '/api/data':
+            query_params = urllib.parse.parse_qs(parsed_url.query)
+            target_file = query_params.get('file', [None])[0]
+            
             payload = {"timestamps": [], "states": []}
-            if os.path.exists('sleep_log.csv'):
-                with open('sleep_log.csv', mode='r') as file:
+            if target_file and os.path.exists(target_file):
+                with open(target_file, mode='r') as file:
                     reader = csv.reader(file)
                     next(reader, None) # Skip header
                     for row in reader:
@@ -50,13 +65,20 @@ def log_and_monitor():
 
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        with open('sleep_log.csv', mode='a', newline='') as file:
-            writer = csv.writer(file)
-            if file.tell() == 0:
-                writer.writerow(['Timestamp', 'Sleep State'])
+        
+        while not alarm_rung:
+            current_time = datetime.now()
+            # Dynamically generate filename based on current date
+            current_date_str = current_time.strftime('%Y-%m-%d')
+            dynamic_filename = f"sleep_log_{current_date_str}.csv"
             
-            while not alarm_rung:
-                current_time = datetime.now()
+            file_exists = os.path.isfile(dynamic_filename)
+            
+            with open(dynamic_filename, mode='a', newline='') as file:
+                writer = csv.writer(file)
+                if not file_exists:
+                    writer.writerow(['Timestamp', 'Sleep State'])
+                
                 if current_time >= window_end:
                     trigger_alarm(ser, "Failsafe - Reached end of buffer window.")
                     break
@@ -77,11 +99,9 @@ def log_and_monitor():
         print(f"Hardware monitoring error: {e}")
 
 if __name__ == '__main__':
-    # Initialize hardware monitoring on a background thread
     monitor_thread = threading.Thread(target=log_and_monitor, daemon=True)
     monitor_thread.start()
 
-    # Initialize the web server on the main thread
     with socketserver.TCPServer(("", PORT), SleepDataServer) as httpd:
         print(f"Unified EEG Server active on port {PORT}")
         httpd.serve_forever()
