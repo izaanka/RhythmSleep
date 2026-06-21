@@ -2,7 +2,7 @@
 
 #define SAMPLES 1024            
 #define SAMPLING_FREQUENCY 256  
-#define EEG_PIN A0
+#define EEG_PIN A2
 
 arduinoFFT FFT = arduinoFFT();
 unsigned int sampling_period_us;
