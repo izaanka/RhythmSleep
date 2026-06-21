@@ -6,7 +6,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
-            background: linear-gradient(135deg, #10002b, #3c096c, #9d4edd);
+            background-color: rgb(36, 178, 180);
             color: #ffffff;
             font-family: 'Courier New', Courier, monospace;
             padding: 20px;
@@ -16,11 +16,25 @@
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            background: rgba(0, 0, 0, 0.6);
+            background: rgba(0, 0, 0, 0.5);
             border-radius: 15px;
             padding: 30px;
-            box-shadow: 0 0 25px rgba(255, 0, 127, 0.4);
-            border: 1px solid #ff007f;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+            border: 2px solid #ffffff;
+        }
+        .controls {
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        select {
+            padding: 10px;
+            font-size: 1.2em;
+            background: #ffffff;
+            color: rgb(36, 178, 180);
+            border: none;
+            border-radius: 5px;
+            font-weight: bold;
+            cursor: pointer;
         }
         .metrics {
             display: flex;
@@ -28,18 +42,22 @@
             margin-bottom: 30px;
         }
         .metric-box {
-            background: rgba(255, 0, 127, 0.1);
-            border-left: 5px solid #ff007f;
+            background: rgba(255, 255, 255, 0.1);
+            border-left: 5px solid #ffffff;
             padding: 20px;
             width: 30%;
             border-radius: 5px;
         }
-        .metric-box h3 { margin: 0 0 10px 0; color: #e0aaff; }
+        .metric-box h3 { margin: 0 0 10px 0; color: #f0f0f0; }
         .metric-box h1 { margin: 0; font-size: 2.5em; }
     </style>
 </head>
 <body>
     <div class="container">
+        <div class="controls">
+            <label for="fileSelect" style="font-size: 1.2em; margin-right: 10px;">Select Date Record:</label>
+            <select id="fileSelect"></select>
+        </div>
         <div class="metrics">
             <div class="metric-box">
                 <h3>Calculated Score</h3>
@@ -51,38 +69,71 @@
             </div>
             <div class="metric-box">
                 <h3>Current Status</h3>
-                <h1 id="currentStatus">Active</h1>
+                <h1 id="currentStatus">Logged</h1>
             </div>
         </div>
         <canvas id="sleepChart" height="100"></canvas>
     </div>
 
     <script>
-        // Map string states to numerical values for Cartesian plotting
         const stateMapping = { "Deep Sleep": 1, "Light Sleep / REM": 2, "Relaxed Awake": 3, "Awake": 4 };
+        let currentChart = null; // Required to destroy old graphs before rendering new ones
+
+        async function initializeMenu() {
+            const response = await fetch('/api/files');
+            const files = await response.json();
+            const selectElement = document.getElementById('fileSelect');
+            
+            if (files.length === 0) {
+                const option = document.createElement('option');
+                option.text = "No logs found";
+                selectElement.add(option);
+                return;
+            }
+
+            files.forEach(file => {
+                const option = document.createElement('option');
+                option.value = file;
+                // Extract YYYY-MM-DD from the filename string for cleaner display
+                option.text = file.replace('sleep_log_', '').replace('.csv', '');
+                selectElement.add(option);
+            });
+
+            // Load the most recent dataset automatically
+            fetchAndRender(selectElement.value);
+
+            // Re-evaluate Cartesian mapping when user selects a different file
+            selectElement.addEventListener('change', (e) => {
+                fetchAndRender(e.target.value);
+            });
+        }
         
-        async function fetchAndRender() {
-            const response = await fetch('/api/data');
+        async function fetchAndRender(filename) {
+            if (!filename) return;
+
+            const response = await fetch(`/api/data?file=${filename}`);
             const data = await response.json();
             
-            if(data.timestamps.length === 0) return;
+            if(data.timestamps.length === 0) {
+                document.getElementById('sleepScore').innerText = "--";
+                document.getElementById('totalTime').innerText = "0h 0m";
+                if(currentChart) currentChart.destroy();
+                return;
+            }
 
             let deepCount = 0, lightCount = 0, wakeCount = 0;
             const numericStates = data.states.map((state, index) => {
                 if(state.includes("Deep")) deepCount++;
                 else if(state.includes("Light")) lightCount++;
                 else if(state.includes("Awake")) {
-                    // Count unique wake interruptions (ignoring continuous wake logs)
                     if(index === 0 || !data.states[index-1].includes("Awake")) wakeCount++;
                 }
                 return stateMapping[state] || 0;
             });
 
-            // Hardware timestamp calculations
-            const totalMinutes = data.timestamps.length; // Assuming 1 log per minute roughly
+            const totalMinutes = data.timestamps.length; 
             document.getElementById('totalTime').innerText = `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
             
-            // Execute statistical derivation formula
             let score = 0;
             if (totalMinutes > 0) {
                 let rawScore = (((1.5 * deepCount) + (1.0 * lightCount)) / totalMinutes) * 100 - (5 * wakeCount);
@@ -90,17 +141,20 @@
             }
             document.getElementById('sleepScore').innerText = score;
 
-            // Render detailed coordinate graph
+            if (currentChart) {
+                currentChart.destroy();
+            }
+
             const ctx = document.getElementById('sleepChart').getContext('2d');
-            new Chart(ctx, {
+            currentChart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: data.timestamps.map(t => t.split(' ')[1]),
                     datasets: [{
                         label: 'Neurological State',
                         data: numericStates,
-                        borderColor: '#ff007f',
-                        backgroundColor: 'rgba(255, 0, 127, 0.2)',
+                        borderColor: '#ffffff',
+                        backgroundColor: 'rgba(255, 255, 255, 0.2)',
                         borderWidth: 3,
                         stepped: true,
                         fill: true,
@@ -115,12 +169,12 @@
                                 callback: function(value) {
                                     return Object.keys(stateMapping).find(key => stateMapping[key] === value);
                                 },
-                                color: '#e0aaff'
+                                color: '#ffffff'
                             },
                             min: 0.5,
                             max: 4.5
                         },
-                        x: { ticks: { color: '#e0aaff', maxTicksLimit: 20 } }
+                        x: { ticks: { color: '#ffffff', maxTicksLimit: 20 } }
                     },
                     plugins: {
                         legend: { labels: { color: '#ffffff' } }
@@ -129,9 +183,7 @@
             });
         }
         
-        fetchAndRender();
-        // Automatically refresh network requests every 60 seconds
-        setInterval(fetchAndRender, 60000); 
+        initializeMenu();
     </script>
 </body>
 </html>
