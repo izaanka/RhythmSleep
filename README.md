@@ -1,4 +1,5 @@
-PINOUT
+CONNECTIONS
+
 A0 - EEG input
 
 
