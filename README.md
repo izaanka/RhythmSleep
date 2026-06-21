@@ -6,6 +6,7 @@ install adb (android debug bridge) on your machine
 
 connect arduino uno q to your machine via usb c (data cable)
 
+run commands 
 1. adb shell
    or just connect to the uno q using any CLI
 2. cd RhythmSleep
