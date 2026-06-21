@@ -1,12 +1,12 @@
 CONNECTIONS
 
-A0 - EEG input
+A2 - EEG input
 
 
 TO RUN
 
 first upload code to STM32 using arduino app lab or arduino IDE (prefered) 
-analog pin A0 is connected to eeg sensor for input
+analog pin A2 is connected to eeg sensor for input
 
 install adb (android debug bridge) on your machine 
 
