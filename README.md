@@ -1,3 +1,7 @@
+PINOUT
+A0 - EEG input
+
+
 TO RUN
 
 first upload code to STM32 using arduino app lab or arduino IDE (prefered) 
