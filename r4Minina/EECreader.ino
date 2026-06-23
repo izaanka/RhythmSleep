@@ -19,20 +19,26 @@ ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, SAMPLES, SAMPLING_FREQ
 bool alarmTriggered = false;
 
 void setup() {
-  // 1. Internal Bridge to Host PC (Arduino IDE Serial Monitor)
   Serial.begin(115200);
-  
-  // 2. External Bridge to UNO Q (Hardware TX/RX Pins)
   Serial1.begin(115200);
   
-  Wire.begin();
-  
-  if (!rtc.begin()) {
-    Serial.println("ERROR: RTC_NOT_FOUND");
-    Serial1.println("ERROR: RTC_NOT_FOUND");
-    while (1); 
+  // 1. Force the processor to wait for the PC to open the terminal
+  while (!Serial) {
+    ; // Do nothing until the USB bridge is fully established
   }
 
+  Serial.println("SYSTEM BOOT: Initializing I2C Matrix...");
+  Wire.begin();
+  
+  // 2. Hardware Verification
+  if (!rtc.begin()) {
+    Serial.println("CRITICAL ERROR: PCF8563 RTC NOT FOUND ON I2C BUS.");
+    Serial.println("HALTING PROCESSOR.");
+    Serial1.println("ERROR: RTC_NOT_FOUND");
+    while (1); // The infinite logic trap
+  }
+
+  Serial.println("RTC ALIGNED. Initializing Biological ADC...");
   sampling_period_us = round(1000000.0 / SAMPLING_FREQUENCY);
   analogReadResolution(12);
 }
