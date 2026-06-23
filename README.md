@@ -1,11 +1,12 @@
 CONNECTIONS
 
 A2 - EEG input
-
+Minima TX (Transmit) - UNO Q RX (Receive)
+Minima RX (Receive) - UNO Q TX (Transmit)
 
 TO RUN
-
-first upload code to STM32 using arduino app lab or arduino IDE (prefered) 
+upload EEGreader.ino to minima
+first upload code to STM32 using arduino app lab or arduino IDE (prefered) data_relayer.ino
 analog pin A2 is connected to eeg sensor for input
 
 install adb (android debug bridge) on your machine 
