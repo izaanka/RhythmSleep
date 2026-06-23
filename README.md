@@ -1,19 +1,17 @@
 CONNECTIONS
 
-A2 - EEG input
-Minima TX (Transmit) - UNO Q RX (Receive)
-Minima RX (Receive) - UNO Q TX (Transmit)
-RTC SCL - minima SCL
-RTC SDA - minima SDA
+1. A2 - EEG input
+2. Minima TX (Transmit) - UNO Q RX (Receive)
+3. Minima RX (Receive) - UNO Q TX (Transmit)
+4. RTC SCL - minima SCL
+5. RTC SDA - minima SDA
 
 TO RUN
-upload EEGreader.ino to minima
-first upload code to STM32 using arduino app lab or arduino IDE (prefered) data_relayer.ino
-analog pin A2 is connected to eeg sensor for input
-
-install adb (android debug bridge) on your machine 
-
-connect arduino uno q to your machine via usb c (data cable)
+1. upload EEGreader.ino to minima
+2. then upload code to STM32 using arduino app lab or arduino IDE (prefered) data_relayer.ino
+3. analog pin A2 is connected to eeg sensor for input
+4. install adb (android debug bridge) on your machine
+5. connect arduino uno q to your machine via usb c (data cable)
 
 run commands 
 1. adb shell
