@@ -44,7 +44,7 @@ async function fetchAndRender(filename) {
     let deepMinutes = 0, lightMinutes = 0, wakeCount = 0;
     let totalMinutes = 0;
 
-    // Calculate exact time deltas between phase shifts
+    // Phase 1: Calculate exact time deltas for the UI metrics
     for (let i = 0; i < data.timestamps.length - 1; i++) {
         let t1 = new Date(data.timestamps[i].replace(' ', 'T'));
         let t2 = new Date(data.timestamps[i+1].replace(' ', 'T'));
@@ -60,9 +60,16 @@ async function fetchAndRender(filename) {
         }
     }
 
-    // Map textual states to numerical Cartesian coordinates
-    const numericStates = data.states.map(state => stateMapping[state] || 0);
+    // Phase 2: Restructure the data into strict {x, y} coordinate objects
+    const coordinateData = data.timestamps.map((timestamp, index) => {
+        let currentState = data.states[index];
+        return {
+            x: new Date(timestamp.replace(' ', 'T')), 
+            y: stateMapping[currentState] || 0
+        };
+    });
 
+    // Output calculated metrics
     document.getElementById('totalTime').innerText = `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
     
     let score = 0;
@@ -76,18 +83,19 @@ async function fetchAndRender(filename) {
         currentChart.destroy();
     }
 
+    // Phase 3: Plot the continuous temporal graph
     const ctx = document.getElementById('sleepChart').getContext('2d');
     currentChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: data.timestamps.map(t => t.split(' ')[1]),
+            // Drop categorical labels; let the x-coordinates dictate positioning
             datasets: [{
                 label: 'Neurological State',
-                data: numericStates,
+                data: coordinateData,
                 borderColor: '#ffffff',
                 backgroundColor: 'rgba(255, 255, 255, 0.2)',
                 borderWidth: 3,
-                stepped: true,
+                stepped: 'before', // Execute right-angle drop exactly at phase shift
                 fill: true,
                 pointRadius: 0
             }]
@@ -105,7 +113,20 @@ async function fetchAndRender(filename) {
                     min: 0.5,
                     max: 4.5
                 },
-                x: { ticks: { color: '#ffffff', maxTicksLimit: 20 } }
+                x: { 
+                    type: 'time',
+                    time: {
+                        unit: 'minute',
+                        displayFormats: {
+                            minute: 'HH:mm'
+                        },
+                        tooltipFormat: 'HH:mm'
+                    },
+                    ticks: { 
+                        color: '#ffffff',
+                        maxTicksLimit: 15 // Prevents UI overlap on highly active sleep records
+                    } 
+                }
             },
             plugins: { legend: { labels: { color: '#ffffff' } } }
         }
