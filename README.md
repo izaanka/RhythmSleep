@@ -3,6 +3,8 @@ CONNECTIONS
 A2 - EEG input
 Minima TX (Transmit) - UNO Q RX (Receive)
 Minima RX (Receive) - UNO Q TX (Transmit)
+RTC SCL - minima SCL
+RTC SDA - minima SDA
 
 TO RUN
 upload EEGreader.ino to minima
