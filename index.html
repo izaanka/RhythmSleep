@@ -2,78 +2,371 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>EEG Sleep Analytics</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="RhythmSleep EEG Sleep Analytics Dashboard — Real-time brainwave monitoring and smart alarm system">
+    <title>RhythmSleep — EEG Sleep Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
+        :root {
+            --bg-primary: #0a0e1a;
+            --bg-card: rgba(15, 23, 42, 0.85);
+            --bg-glass: rgba(255, 255, 255, 0.04);
+            --border: rgba(255, 255, 255, 0.08);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-focused: #f43f5e;
+            --accent-active: #f97316;
+            --accent-relaxed: #22d3ee;
+            --accent-light: #a78bfa;
+            --accent-deep: #6366f1;
+            --gradient-primary: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+            --gradient-glow: radial-gradient(ellipse at 50% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 60%);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
         body {
-            background-color: rgb(36, 178, 180);
-            color: #ffffff;
-            font-family: 'Courier New', Courier, monospace;
-            padding: 20px;
-            margin: 0;
+            background-color: var(--bg-primary);
+            background-image: var(--gradient-glow);
+            color: var(--text-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             min-height: 100vh;
+            padding: 24px;
         }
-        .container {
-            max-width: 1200px;
+
+        .dashboard {
+            max-width: 1280px;
             margin: 0 auto;
-            background: rgba(0, 0, 0, 0.5);
-            border-radius: 15px;
-            padding: 30px;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
-            border: 2px solid #ffffff;
         }
-        .controls {
-            margin-bottom: 20px;
-            text-align: center;
-        }
-        select {
-            padding: 10px;
-            font-size: 1.2em;
-            background: #ffffff;
-            color: rgb(36, 178, 180);
-            border: none;
-            border-radius: 5px;
-            font-weight: bold;
-            cursor: pointer;
-        }
-        .metrics {
+
+        /* ── Header ─────────────────────────────────────────────────────── */
+        .header {
             display: flex;
+            align-items: center;
             justify-content: space-between;
-            margin-bottom: 30px;
+            margin-bottom: 28px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
         }
-        .metric-box {
-            background: rgba(255, 255, 255, 0.1);
-            border-left: 5px solid #ffffff;
+
+        .header h1 {
+            font-size: 1.6em;
+            font-weight: 700;
+            background: var(--gradient-primary);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
+        }
+
+        .header .subtitle {
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .file-select {
+            padding: 10px 16px;
+            font-size: 0.9em;
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            cursor: pointer;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .file-select:hover, .file-select:focus {
+            border-color: rgba(99, 102, 241, 0.5);
+        }
+
+        /* ── Live Status Bar ────────────────────────────────────────────── */
+        .live-bar {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .live-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
             padding: 20px;
-            width: 30%;
-            border-radius: 5px;
+            position: relative;
+            overflow: hidden;
+            backdrop-filter: blur(12px);
+            transition: transform 0.2s, border-color 0.3s;
         }
-        .metric-box h3 { margin: 0 0 10px 0; color: #f0f0f0; }
-        .metric-box h1 { margin: 0; font-size: 2.5em; }
+        .live-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(99, 102, 241, 0.3);
+        }
+
+        .live-card .label {
+            font-size: 0.75em;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 8px;
+        }
+
+        .live-card .value {
+            font-size: 1.8em;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .live-card .unit {
+            font-size: 0.5em;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-left: 4px;
+        }
+
+        .live-card .status-dot {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #22c55e;
+            animation: pulse-dot 2s infinite;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+            50% { opacity: 0.7; box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+        }
+
+        .band-focused  .value { color: var(--accent-focused); }
+        .band-active   .value { color: var(--accent-active); }
+        .band-relaxed  .value { color: var(--accent-relaxed); }
+        .band-light    .value { color: var(--accent-light); }
+        .band-deep     .value { color: var(--accent-deep); }
+
+        /* ── Metrics Row ────────────────────────────────────────────────── */
+        .metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .metric-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 22px;
+            backdrop-filter: blur(12px);
+        }
+
+        .metric-box .label {
+            font-size: 0.75em;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 10px;
+        }
+
+        .metric-box .value {
+            font-size: 2.2em;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+        }
+
+        /* ── Chart Container ────────────────────────────────────────────── */
+        .chart-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+            margin-bottom: 24px;
+            backdrop-filter: blur(12px);
+        }
+
+        .chart-container h2 {
+            font-size: 1em;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        /* ── Alarm Panel ────────────────────────────────────────────────── */
+        .alarm-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+            backdrop-filter: blur(12px);
+        }
+
+        .alarm-panel h2 {
+            font-size: 1em;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 16px;
+        }
+
+        .alarm-form {
+            display: flex;
+            align-items: flex-end;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .alarm-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .alarm-field label {
+            font-size: 0.75em;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        .alarm-field input {
+            padding: 10px 14px;
+            font-size: 1.1em;
+            font-family: inherit;
+            font-weight: 600;
+            background: var(--bg-glass);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            width: 100px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .alarm-field input:focus {
+            border-color: rgba(99, 102, 241, 0.5);
+        }
+
+        .alarm-btn {
+            padding: 10px 24px;
+            font-size: 0.9em;
+            font-family: inherit;
+            font-weight: 600;
+            color: white;
+            background: var(--gradient-primary);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.15s;
+        }
+        .alarm-btn:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }
+        .alarm-btn:active {
+            transform: translateY(0);
+        }
+
+        .alarm-status {
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-left: 8px;
+            transition: color 0.3s;
+        }
+        .alarm-status.success { color: #22c55e; }
+        .alarm-status.error { color: var(--accent-focused); }
+
+        /* ── Responsive ─────────────────────────────────────────────────── */
+        @media (max-width: 768px) {
+            .live-bar { grid-template-columns: 1fr 1fr; }
+            .metrics { grid-template-columns: 1fr; }
+            .alarm-form { flex-direction: column; align-items: stretch; }
+            .alarm-field input { width: 100%; }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="controls">
-            <label for="fileSelect" style="font-size: 1.2em; margin-right: 10px;">Select Date Record:</label>
-            <select id="fileSelect"></select>
+    <div class="dashboard">
+        <!-- Header -->
+        <div class="header">
+            <div>
+                <h1>RhythmSleep</h1>
+                <div class="subtitle">EEG Brainwave Analytics</div>
+            </div>
+            <select id="fileSelect" class="file-select"></select>
         </div>
+
+        <!-- Live Status Bar -->
+        <div class="live-bar">
+            <div class="live-card" id="liveFreqCard">
+                <div class="status-dot"></div>
+                <div class="label">Live Frequency</div>
+                <div class="value" id="liveFreq">--<span class="unit">Hz</span></div>
+            </div>
+            <div class="live-card" id="liveBandCard">
+                <div class="label">Brain State</div>
+                <div class="value" id="liveBand">---</div>
+            </div>
+            <div class="live-card" id="liveAlarmCard">
+                <div class="label">Alarm Set</div>
+                <div class="value" id="liveAlarm">--:--</div>
+            </div>
+            <div class="live-card">
+                <div class="label">Alarm Status</div>
+                <div class="value" id="liveAlarmStatus" style="color: #22c55e;">Standby</div>
+            </div>
+        </div>
+
+        <!-- Metrics -->
         <div class="metrics">
             <div class="metric-box">
-                <h3>Calculated Score</h3>
-                <h1 id="sleepScore">--</h1>
+                <div class="label">Sleep Score</div>
+                <div class="value" id="sleepScore">--</div>
             </div>
             <div class="metric-box">
-                <h3>Total Tracked Time</h3>
-                <h1 id="totalTime">--</h1>
+                <div class="label">Total Tracked</div>
+                <div class="value" id="totalTime">--</div>
             </div>
             <div class="metric-box">
-                <h3>Current Status</h3>
-                <h1 id="currentStatus">Logged</h1>
+                <div class="label">Dominant State</div>
+                <div class="value" id="dominantState">--</div>
             </div>
         </div>
-        <canvas id="sleepChart" height="100"></canvas>
+
+        <!-- Chart -->
+        <div class="chart-container">
+            <h2>Brainwave Timeline</h2>
+            <canvas id="sleepChart" height="90"></canvas>
+        </div>
+
+        <!-- Alarm Configuration -->
+        <div class="alarm-panel">
+            <h2>Smart Alarm Configuration</h2>
+            <div class="alarm-form">
+                <div class="alarm-field">
+                    <label>Alarm Hour (0-23)</label>
+                    <input type="number" id="alarmHour" min="0" max="23" value="5">
+                </div>
+                <div class="alarm-field">
+                    <label>Alarm Minute (0-59)</label>
+                    <input type="number" id="alarmMin" min="0" max="59" value="30">
+                </div>
+                <div class="alarm-field">
+                    <label>Buffer (minutes)</label>
+                    <input type="number" id="bufferMin" min="5" max="120" step="5" value="30">
+                </div>
+                <button class="alarm-btn" id="setAlarmBtn" onclick="setAlarm()">Set Alarm</button>
+                <span class="alarm-status" id="alarmStatusMsg"></span>
+            </div>
+        </div>
     </div>
 
     <script src="app.js"></script>
