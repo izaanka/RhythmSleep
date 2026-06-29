@@ -26,7 +26,7 @@ A dual-Arduino EEG brainwave monitoring system with smart alarm functionality. T
       UNO Q RX ◄────│ TX1 (Serial1)    │
       UNO Q TX ────►│ RX1 (Serial1)    │
                     │                  │
-          PC USB ◄──│ USB (Serial)     │ (debug monitor)
+                    │                  │ 
                     └──────────────────┘
 ```
 
