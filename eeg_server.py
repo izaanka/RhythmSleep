@@ -44,6 +44,10 @@ shared_state = {
 serial_connection = None
 serial_lock = threading.Lock()
 
+# Serial logs for debug tab
+serial_logs = deque(maxlen=500)
+serial_logs_lock = threading.Lock()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Smart Alarm State (only accessed from monitor thread)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -96,6 +100,11 @@ class SleepDataServer(http.server.SimpleHTTPRequestHandler):
                     "alarm_hour": shared_state["alarm_m"] // 60,
                     "alarm_min": shared_state["alarm_m"] % 60
                 }
+            self._json_response(payload)
+
+        elif parsed_url.path == '/api/serial':
+            with serial_logs_lock:
+                payload = list(serial_logs)
             self._json_response(payload)
         else:
             super().do_GET()
@@ -335,6 +344,9 @@ def log_and_monitor():
                 
                 if not raw_line:
                     continue
+
+                with serial_logs_lock:
+                    serial_logs.append(raw_line)
 
                 # Skip boot/debug messages from UNO Q
                 if raw_line.startswith("UNOQ"):

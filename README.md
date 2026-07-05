@@ -15,18 +15,18 @@ A dual-Arduino EEG brainwave monitoring system with smart alarm functionality. T
                     │                  │
           EEG In ──►│ A2               │
                     │                  │
-      RTC SDA ◄────►│ SDA (I2C)        │◄────► OLED SDA
-      RTC SCL ◄────►│ SCL (I2C)        │◄────► OLED SCL
+     RTC SDA ◄────►│ SDA (I2C)        │◄────► OLED SDA
+     RTC SCL ◄────►│ SCL (I2C)        │◄────► OLED SCL
                     │                  │
-    BTN_MODE ──────►│ D2 (INPUT_PULLUP)│ ◄── to GND via button
-      BTN_UP ──────►│ D3 (INPUT_PULLUP)│ ◄── to GND via button
-    BTN_DOWN ──────►│ D4 (INPUT_PULLUP)│ ◄── to GND via button
-  BTN_SELECT ──────►│ D5 (INPUT_PULLUP)│ ◄── to GND via button
+   BTN_MODE ──────►│ D2 (INPUT_PULLUP)│ ◄── to GND via button
+     BTN_UP ──────►│ D3 (INPUT_PULLUP)│ ◄── to GND via button
+   BTN_DOWN ──────►│ D4 (INPUT_PULLUP)│ ◄── to GND via button
+ BTN_SELECT ──────►│ D5 (INPUT_PULLUP)│ ◄── to GND via button
                     │                  │
-      UNO Q RX ◄────│ TX1 (Serial1)    │
-      UNO Q TX ────►│ RX1 (Serial1)    │
+    UNO Q RX ◄────│ TX1 (Serial1)    │
+    UNO Q TX ────►│ RX1 (Serial1)    │
                     │                  │
-                    │                  │ 
+         PC USB ◄──│ USB (Serial)     │ (debug monitor)
                     └──────────────────┘
 ```
 

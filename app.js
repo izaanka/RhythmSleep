@@ -348,6 +348,57 @@ async function loadAlarmSettings() {
 }
 
 // ============================================================================
+// DEBUG CONSOLE & TABS
+// ============================================================================
+let serialPollingInterval = null;
+let isDebugActive = false;
+
+function switchTab(tabId) {
+    // Update buttons
+    document.getElementById('btn-dashboard').classList.remove('active');
+    document.getElementById('btn-debug').classList.remove('active');
+    document.getElementById(`btn-${tabId}`).classList.add('active');
+
+    // Update views
+    if (tabId === 'dashboard') {
+        document.getElementById('dashboard-view').style.display = 'block';
+        document.getElementById('debug-view').style.display = 'none';
+        isDebugActive = false;
+    } else if (tabId === 'debug') {
+        document.getElementById('dashboard-view').style.display = 'none';
+        document.getElementById('debug-view').style.display = 'block';
+        isDebugActive = true;
+        // Scroll to bottom when opening
+        let consoleEl = document.getElementById('serialConsole');
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+}
+
+function clearConsole() {
+    document.getElementById('serialConsole').innerText = '';
+}
+
+async function pollSerialData() {
+    if (!isDebugActive) return; // Only fetch if the tab is visible to save resources
+
+    try {
+        const response = await fetch('/api/serial');
+        const data = await response.json();
+        
+        let consoleEl = document.getElementById('serialConsole');
+        let wasAtBottom = consoleEl.scrollHeight - consoleEl.scrollTop <= consoleEl.clientHeight + 10;
+        
+        consoleEl.innerText = data.join('\n');
+        
+        if (wasAtBottom) {
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+    } catch (e) {
+        // Silently handle
+    }
+}
+
+// ============================================================================
 // BOOT SEQUENCE
 // ============================================================================
 initializeMenu();
@@ -357,3 +408,6 @@ loadAlarmSettings();
 livePollingInterval = setInterval(pollLiveData, 2000);
 // Initial poll
 pollLiveData();
+
+// Poll serial data every 1 second
+serialPollingInterval = setInterval(pollSerialData, 1000);
