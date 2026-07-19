@@ -1,0 +1,7 @@
+profiles:
+  default:
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - Wire
+default_profile: default

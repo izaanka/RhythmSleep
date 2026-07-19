@@ -1,0 +1,9 @@
+# app.yaml: Configuration for the RhythmSleep UNO Q component.
+# The UNO Q acts as an I2C slave, relaying EEG data and events
+# from the R4 Minima to the Python server via USB Serial.
+
+name: RhythmSleep-Q
+description: "UNO Q data relay — I2C slave @ 0x09, forwards EEG data to Python server via USB Serial"
+ports: []
+bricks: []
+icon: 🧠
