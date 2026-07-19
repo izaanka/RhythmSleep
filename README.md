@@ -130,7 +130,7 @@ R4 Minima GND        ── OLED GND
 
 ```
                     ┌──────────────────┐
-                    │   Arduino UNO R3  │
+                    │   Arduino UNO R3 │
                     │                  │
        LCD SDA ◄───►│ A4  (SDA)        │◄───► PCF8563 SDA
        LCD SCL ◄───►│ A5  (SCL)        │◄───► PCF8563 SCL
@@ -161,7 +161,7 @@ R4 Minima GND        ── OLED GND
           EEG In ──►│ A2               │
                     │                  │
   [Shared bus]      │                  │  [Local OLED bus]
-  R3 Master ◄─────►│ A4/SDA  SDA1 ◄──►│ OLED SDA
+   R3 Master ◄─────►│ A4/SDA  SDA1 ◄──►│ OLED SDA
                    ►│ A5/SCL  SCL1 ◄──►│ OLED SCL
                     │                  │
      BTN_MODE ─────►│ D2 (INPUT_PULLUP)│
