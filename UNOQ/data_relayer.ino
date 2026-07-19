@@ -1,76 +1,105 @@
 // ============================================================================
-// RhythmSleep — UNO Q (STM32) Classifier & Data Relay
-// ============================================================================
-// Receives dominant frequency from R4 Minima via Serial1,
-// classifies into brainwave band, formats CSV-ready data,
-// and relays to the Python server running on the Linux environment.
+// RhythmSleep — UNO Q  (I2C Slave @ 0x09)
+// Responsibilities:
+//   • I2C slave — receives commands from R3 master
+//   • Forwards EEG data + events to Python server via USB Serial
+//   • Forwards Python commands back to R3 via I2C (future use)
 //
-// Also relays SET_ALARM commands from Minima buttons → Python server,
-// and WAKE/SET_TIME commands from Python server → Minima.
+// Commands from R3 (received via I2C onReceive):
+//   0xA1 + float(4B) + state(1B) + conf(1B) → CSV line to Python
+//   0xA2                                     → "WAKE" to Python
+//   0xA3 + alarmH(1B) + alarmM(1B) + buf(1B) → SET_ALARM to Python
 //
-// Serial  = Bridge to internal Debian Linux (Python server)
-// Serial1 = Bridge to R4 Minima physical TX/RX pins
+// USB Serial format to Python server (unchanged):
+//   "freq,BandName"   e.g.  "7.25,Light Sleep"
+//   "WAKE"
+//   "SET_ALARM:HH:MM,bufMin"
 // ============================================================================
 
-// Brainwave band thresholds
-#define GAMMA_MIN  30.0   // Focused: 30-100 Hz
-#define BETA_MIN   12.0   // Active:  12-30 Hz
-#define ALPHA_MIN   8.0   // Relaxed: 8-12 Hz
-#define THETA_MIN   4.0   // Light Sleep: 4-8 Hz
-#define DELTA_MIN   0.5   // Deep Sleep: 0.5-4 Hz
+#include <Wire.h>
 
+#define MY_I2C_ADDR 0x09
+
+// Band label lookup
+const char* BAND_LBL[] = {"Unknown","Deep Sleep","Light Sleep","Relaxed","Active","Focused"};
+
+// I2C receive buffer
+#define RX_BUF_SIZE 16
+volatile uint8_t rxBuf[RX_BUF_SIZE];
+volatile uint8_t rxLen = 0;
+volatile bool    rxReady = false;
+
+// ─────────────────────────────────────────────────────────────────────────────
+void onI2CReceive(int numBytes) {
+  rxLen = 0;
+  while (Wire.available() && rxLen < RX_BUF_SIZE) {
+    rxBuf[rxLen++] = Wire.read();
+  }
+  rxReady = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
-  // Bridge to the internal Debian Linux environment
   Serial.begin(115200);
-  
-  // Bridge to the external Arduino R4 Minima physical RX/TX pins
-  Serial1.begin(115200);
-
-  Serial.println("UNOQ BOOT: Classifier + Relay active.");
+  Wire.begin(MY_I2C_ADDR);
+  Wire.onReceive(onI2CReceive);
+  Serial.println(F("UNOQ BOOT: I2C slave active."));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 void loop() {
-  // ── 1. Receive data from Minima ──────────────────────────────────────────
-  if (Serial1.available() > 0) {
-    String sensorData = Serial1.readStringUntil('\n');
-    sensorData.trim();
-
-    // Frequency reading: "FREQ:XX.XX"
-    if (sensorData.startsWith("FREQ:")) {
-      float frequency = sensorData.substring(5).toFloat();
-      String band = classifyBand(frequency);
-
-      // Send classified data to Python: "FREQ,Band"
-      Serial.print(frequency, 2);
-      Serial.print(",");
-      Serial.println(band);
-    }
-    // Alarm settings from Minima buttons: "SET_ALARM:alarm_m,buffer_m"
-    else if (sensorData.startsWith("SET_ALARM:")) {
-      Serial.println(sensorData);  // Forward to Python server
-    }
-    // Forward other messages (ERROR, etc.) as-is
-    else {
-      Serial.println(sensorData);
-    }
+  // Handle incoming I2C message in main loop (safe, not in ISR)
+  if (rxReady) {
+    rxReady = false;
+    processI2CMessage();
   }
 
-  // ── 2. Forward Commands: Linux → Minima ──────────────────────────────────
-  // Relay WAKE, SET_TIME, SET_ALARM commands from Python to Minima
-  if (Serial.available() > 0) {
-    String linuxCommand = Serial.readStringUntil('\n');
-    Serial1.println(linuxCommand);
+  // Forward any Python → R3 commands (future use: currently echo only)
+  // If Python sends a line, forward it back via Serial so it's logged
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    // Reserved for future R3 acknowledgement commands
+    // For now, just echo back for debugging
+    Serial.print(F("ECHO:"));
+    Serial.println(cmd);
   }
 }
 
-// ============================================================================
-// BRAINWAVE CLASSIFICATION
-// ============================================================================
-String classifyBand(float freq) {
-  if (freq >= GAMMA_MIN) return "Focused";       // Gamma: 30-100 Hz
-  if (freq >= BETA_MIN)  return "Active";         // Beta:  12-30 Hz
-  if (freq >= ALPHA_MIN) return "Relaxed";        // Alpha: 8-12 Hz
-  if (freq >= THETA_MIN) return "Light Sleep";    // Theta: 4-8 Hz
-  if (freq >= DELTA_MIN) return "Deep Sleep";     // Delta: 0.5-4 Hz
-  return "Unknown";
+// ─────────────────────────────────────────────────────────────────────────────
+void processI2CMessage() {
+  if (rxLen == 0) return;
+
+  uint8_t cmd = rxBuf[0];
+
+  if (cmd == 0xA1 && rxLen >= 7) {
+    // EEG data: freq(4B float) + state(1B) + conf(1B)
+    float freq = 0.0f;
+    memcpy(&freq, (void*)(rxBuf + 1), 4);
+    uint8_t state = rxBuf[5];
+    uint8_t conf  = rxBuf[6];
+    const char* band = (state < 6) ? BAND_LBL[state] : "Unknown";
+
+    // CSV line: "freq,Band,confidence"
+    Serial.print(freq, 2);
+    Serial.print(',');
+    Serial.print(band);
+    Serial.print(',');
+    Serial.println(conf);
+  }
+  else if (cmd == 0xA2) {
+    // Alarm triggered
+    Serial.println(F("WAKE"));
+  }
+  else if (cmd == 0xA3 && rxLen >= 4) {
+    // Alarm settings: alarmH + alarmM + buf
+    uint8_t aH  = rxBuf[1];
+    uint8_t aM  = rxBuf[2];
+    uint8_t buf = rxBuf[3];
+    // Format: SET_ALARM:HH:MM,bufMin
+    Serial.print(F("SET_ALARM:"));
+    if (aH < 10) Serial.print('0'); Serial.print(aH); Serial.print(':');
+    if (aM < 10) Serial.print('0'); Serial.print(aM); Serial.print(',');
+    Serial.println(buf);
+  }
 }
