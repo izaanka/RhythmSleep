@@ -1,398 +1,394 @@
 // ============================================================================
-// RhythmSleep — R4 Minima EEG Reader + OLED Interface (Optimized)
+// RhythmSleep — Arduino R4 Minima  (I2C Slave @ 0x08)
+// Responsibilities:
+//   • EEG sampling (A2) + optimized FFT sleep-state engine
+//   • OLED display: Sleep State screen + Alarm Settings screen (NO time)
+//   • 4 buttons: MODE / UP / DOWN / SELECT
+//   • I2C slave: responds to R3 master requests with state packet
+//
+// Optimized algorithm — Weighted Band-Power Accumulator:
+//   Each FFT frame (1024 samples @ 256 Hz = 4 s) computes power in all 5
+//   EEG bands. A sliding window of 8 frames (~32 s total) accumulates band
+//   power. The winning band drives the state. A 3-frame hysteresis gate and
+//   40% confidence threshold prevent jitter. Artifact frames are discarded.
+//
+// I2C bus split:
+//   Wire  (A4/A5)   → I2C slave bus shared with R3 master
+//   Wire1 (SDA1/SCL1) → local master bus for SSD1306 OLED only
 // ============================================================================
 
 #include <Wire.h>
-#include "RTClib.h"
-#include "arduinoFFT.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "arduinoFFT.h"
 
-// ── FFT Configuration ───────────────────────────────────────────────────────
-#define SAMPLES 1024
-#define SAMPLING_FREQUENCY 256
-#define EEG_PIN A2
+// ── FFT ──────────────────────────────────────────────────────────────────────
+#define SAMPLES            1024
+#define SAMPLING_FREQ      256
+#define EEG_PIN            A2
+#define BIN_RES_INV        4    // SAMPLES/SAMPLING_FREQ — bins per Hz
 
-// ── OLED Configuration ─────────────────────────────────────────────────────
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define OLED_ADDR 0x3C
+// ── OLED (on Wire1, local bus) ────────────────────────────────────────────────
+#define SCREEN_W   128
+#define SCREEN_H   64
+#define OLED_ADDR  0x3C
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire1, -1);
 
-// ── Button Pins ─────────────────────────────────────────────────────────────
+// ── Buttons ───────────────────────────────────────────────────────────────────
 #define BTN_MODE   2
 #define BTN_UP     3
 #define BTN_DOWN   4
 #define BTN_SELECT 5
-
-// ── Display Modes ───────────────────────────────────────────────────────────
-enum DisplayMode {
-  MODE_TIME = 0,
-  MODE_STATE = 1,
-  MODE_ALARM = 2,
-  MODE_COUNT = 3
-};
-
-// ── Alarm Edit Fields ───────────────────────────────────────────────────────
-enum AlarmField {
-  FIELD_ALARM_HOUR = 0,
-  FIELD_ALARM_MIN = 1,
-  FIELD_BUFFER = 2,
-  FIELD_COUNT = 3
-};
-
-// ── FFT Buffers ─────────────────────────────────────────────────────────────
-double vReal[SAMPLES];
-double vImag[SAMPLES];
-
-// ── Global Objects ──────────────────────────────────────────────────────────
-RTC_PCF8563 rtc;
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, SAMPLES, SAMPLING_FREQUENCY);
-
-unsigned int sampling_period_us;
-unsigned long lastSampleTime = 0;
-int sampleIndex = 0;
-
-// ── State Variables ─────────────────────────────────────────────────────────
-DisplayMode currentMode = MODE_TIME;
-AlarmField  currentField = FIELD_ALARM_HOUR;
-
-int alarm_hour = 5;
-int alarm_min  = 30;
-int alarm_m    = 330;
-int buffer_m   = 30;
-
-double dominantFreq = 0.0;
-String currentBand  = "---";
-bool alarmRinging = false;
-
-bool prevBtnState[4] = {HIGH, HIGH, HIGH, HIGH};
-unsigned long lastBtnChange[4] = {0, 0, 0, 0};
 #define DEBOUNCE_MS 50
 
-unsigned long lastDisplayUpdate = 0;
-#define DISPLAY_INTERVAL_MS 250
+// ── Display modes ─────────────────────────────────────────────────────────────
+enum DispMode { MODE_STATE = 0, MODE_ALARM = 1, MODE_COUNT = 2 };
+enum AlarmFld { FLD_HOUR = 0, FLD_MIN = 1, FLD_BUF = 2, FLD_COUNT = 3 };
 
-// ── Forward Declarations ────────────────────────────────────────────────────
-void updateDisplay();
-void drawTimeMode(DateTime now);
-void drawStateMode(DateTime now);
-void drawAlarmMode();
-void handleButtons();
-bool buttonPressed(int pin, int idx);
-void classifyFrequency(double freq);
-void processCommands();
-void recalcAlarmMinutes();
-void sendAlarmToUNOQ();
+// ── Alarm settings (editable by user) ────────────────────────────────────────
+volatile uint8_t alarmHour  = 6;
+volatile uint8_t alarmMin   = 0;
+volatile uint8_t bufferMin  = 30;
 
-// ============================================================================
-// SETUP
-// ============================================================================
+// ── Sleep state constants ─────────────────────────────────────────────────────
+// Enum index → band name / label
+// 0=Unknown 1=DeepSlp(Delta) 2=LtSleep(Theta) 3=Relaxed(Alpha) 4=Active(Beta) 5=Focused(Gamma)
+const char* BAND_LBL[] = {"Unknown", "Deep Sleep", "Light Sleep", "Relaxed", "Active", "Focused"};
+
+// ── Band-power accumulator ────────────────────────────────────────────────────
+#define NUM_BANDS      5
+#define WIN_SIZE       8     // frames to accumulate (~32 s)
+#define HYSTERESIS_N   3     // consecutive agreements to accept state
+#define CONF_THRESHOLD 40    // minimum confidence to apply hysteresis gate
+
+// Bin ranges (inclusive): bin = freq_hz * BIN_RES_INV
+//  Delta 0.5–4 Hz → bins  2–16
+//  Theta 4–8 Hz   → bins 16–32
+//  Alpha 8–12 Hz  → bins 32–48
+//  Beta 12–30 Hz  → bins 48–120
+//  Gamma 30–60 Hz → bins 120–240
+const uint16_t BAND_BIN_LO[NUM_BANDS] = {  2,  16,  32,  48, 120 };
+const uint16_t BAND_BIN_HI[NUM_BANDS] = { 16,  32,  48, 120, 240 };
+
+double bandWindow[WIN_SIZE][NUM_BANDS];  // rolling power window
+uint8_t winIdx      = 0;
+uint8_t winFilled   = 0;
+
+uint8_t candState   = 0;
+uint8_t candCount   = 0;
+
+// ── Shared volatile state (written by main loop, read by I2C ISR) ─────────────
+volatile float   gFreq       = 0.0f;
+volatile uint8_t gState      = 0;
+volatile uint8_t gConf       = 0;
+
+// ── FFT buffers ───────────────────────────────────────────────────────────────
+double vReal[SAMPLES];
+double vImag[SAMPLES];
+ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, SAMPLES, SAMPLING_FREQ);
+
+// ── Sampling state ────────────────────────────────────────────────────────────
+unsigned int  sampPeriodUs;
+unsigned long lastSampleUs = 0;
+int           sampleIdx    = 0;
+
+// ── Artifact rejection threshold (ADC counts, empirical) ─────────────────────
+#define ARTIFACT_PEAK_THRESHOLD 3500.0
+
+// ── UI state ─────────────────────────────────────────────────────────────────
+DispMode  dispMode    = MODE_STATE;
+AlarmFld  alarmField  = FLD_HOUR;
+bool      prevBtn[4]  = {HIGH, HIGH, HIGH, HIGH};
+unsigned long lastBtnMs[4] = {0, 0, 0, 0};
+unsigned long tDisplay = 0;
+#define DISP_MS 300
+
+// ── I2C response buffer (10 bytes) ───────────────────────────────────────────
+//  [0-3] float freq  [4] state  [5] conf  [6] alarmH  [7] alarmM  [8] bufMin  [9] 0x00
+volatile uint8_t i2cBuf[10];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// I2C slave callbacks
+// ─────────────────────────────────────────────────────────────────────────────
+void onI2CRequest() {
+  Wire.write((uint8_t*)i2cBuf, 10);
+}
+
+void onI2CReceive(int) {
+  while (Wire.available()) Wire.read();  // consume any incoming byte (command)
+}
+
+// ── Helper: pack latest state into i2cBuf (call from main loop) ──────────────
+void packI2CBuf() {
+  float f = gFreq;
+  uint8_t tmp[4];
+  memcpy(tmp, &f, 4);
+  i2cBuf[0] = tmp[0]; i2cBuf[1] = tmp[1]; i2cBuf[2] = tmp[2]; i2cBuf[3] = tmp[3];
+  i2cBuf[4] = gState;
+  i2cBuf[5] = gConf;
+  i2cBuf[6] = alarmHour;
+  i2cBuf[7] = alarmMin;
+  i2cBuf[8] = bufferMin;
+  i2cBuf[9] = 0x00;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 void setup() {
-  Serial1.begin(115200); 
-  Serial1.setTimeout(20); // Prevent blocking on incomplete serial reads
+  analogReadResolution(12);
+  sampPeriodUs = (unsigned int)(1000000.0 / SAMPLING_FREQ);
 
-  Wire.begin();
+  // ── I2C: Wire1 = local OLED master ───────────────────────────────────────
+  Wire1.begin();
+  delay(200);
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0); display.println(F("RhythmSleep"));
+  display.setCursor(0, 12); display.println(F("EEG Engine Ready"));
+  display.display();
 
-  // ── RTC Init ──────────────────────────────────────────────────────────────
-  if (!rtc.begin()) {
-    Serial1.println("ERROR: RTC_NOT_FOUND");
-    while (1);
-  }
+  // ── I2C: Wire = slave to R3 master ───────────────────────────────────────
+  Wire.begin(0x08);
+  Wire.onRequest(onI2CRequest);
+  Wire.onReceive(onI2CReceive);
 
-  // ── OLED Init ─────────────────────────────────────────────────────────────
-  delay(250); // Give OLED controller time to power up and stabilize
-  if (display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    display.clearDisplay();
-    display.setTextColor(SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(0, 0);
-    display.println("RhythmSleep");
-    display.println("Initializing...");
-    display.display();
-  }
-
-  // ── Button Init ───────────────────────────────────────────────────────────
+  // ── Buttons ───────────────────────────────────────────────────────────────
   pinMode(BTN_MODE,   INPUT_PULLUP);
   pinMode(BTN_UP,     INPUT_PULLUP);
   pinMode(BTN_DOWN,   INPUT_PULLUP);
   pinMode(BTN_SELECT, INPUT_PULLUP);
 
-  // ── FFT Init ──────────────────────────────────────────────────────────────
-  sampling_period_us = round(1000000.0 / SAMPLING_FREQUENCY);
-  analogReadResolution(12);
+  // Initialise band-power window to zero
+  memset(bandWindow, 0, sizeof(bandWindow));
 }
 
-// ============================================================================
-// MAIN LOOP
-// ============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
 void loop() {
-  // ── 1. Non-Blocking EEG Sampling ──────────────────────────────────────────
-  unsigned long currentMicros = micros();
-  if (currentMicros - lastSampleTime >= sampling_period_us) {
-    lastSampleTime = currentMicros;
-    vReal[sampleIndex] = analogRead(EEG_PIN);
-    vImag[sampleIndex] = 0;
-    sampleIndex++;
+  // ── Non-blocking EEG sampling ─────────────────────────────────────────────
+  unsigned long nowUs = micros();
+  if (nowUs - lastSampleUs >= sampPeriodUs) {
+    lastSampleUs = nowUs;
+    vReal[sampleIdx] = (double)analogRead(EEG_PIN);
+    vImag[sampleIdx] = 0.0;
+    sampleIdx++;
 
-    // ── 2. Run FFT when buffer is full ──────────────────────────────────────
-    if (sampleIndex >= SAMPLES) {
-      FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-      FFT.compute(FFT_FORWARD);
-      FFT.complexToMagnitude();
-
-      double maxMagnitude = 0;
-      int maxBin = 2;
-      for (int i = 2; i <= 400; i++) {
-        if (vReal[i] > maxMagnitude) {
-          maxMagnitude = vReal[i];
-          maxBin = i;
-        }
-      }
-
-      dominantFreq = (double)maxBin * SAMPLING_FREQUENCY / SAMPLES;
-      classifyFrequency(dominantFreq);
-      
-      Serial1.print("FREQ:");
-      Serial1.println(dominantFreq, 2);
-
-      sampleIndex = 0; 
+    if (sampleIdx >= SAMPLES) {
+      sampleIdx = 0;
+      runFFT();
+      packI2CBuf();
     }
   }
 
-  // ── 3. Handle buttons ─────────────────────────────────────────────────────
+  // ── Buttons ───────────────────────────────────────────────────────────────
   handleButtons();
 
-  // ── 4. Update OLED display ────────────────────────────────────────────────
-  if (millis() - lastDisplayUpdate > DISPLAY_INTERVAL_MS) {
-    lastDisplayUpdate = millis();
-    updateDisplay();
+  // ── OLED ──────────────────────────────────────────────────────────────────
+  if (millis() - tDisplay > DISP_MS) {
+    tDisplay = millis();
+    updateOLED();
   }
-
-  // ── 5. Process incoming commands from UNO Q ───────────────────────────────
-  processCommands();
 }
 
-// ============================================================================
-// FREQUENCY CLASSIFICATION 
-// ============================================================================
-void classifyFrequency(double freq) {
-  if (freq >= 30.0)       currentBand = "Focused";
-  else if (freq >= 12.0)  currentBand = "Active";
-  else if (freq >= 8.0)   currentBand = "Relaxed";
-  else if (freq >= 4.0)   currentBand = "Light Sleep";
-  else if (freq >= 0.5)   currentBand = "Deep Sleep";
-  else                    currentBand = "---";
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Optimized FFT + band-power accumulator
+// ─────────────────────────────────────────────────────────────────────────────
+void runFFT() {
+  FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+  FFT.compute(FFT_FORWARD);
+  FFT.complexToMagnitude();
 
-// ============================================================================
-// BUTTON HANDLING
-// ============================================================================
-bool buttonPressed(int pin, int idx) {
-  bool reading = digitalRead(pin);
-  bool pressed = false;
-  
-  if (reading == LOW && prevBtnState[idx] == HIGH) {
-    if (millis() - lastBtnChange[idx] > DEBOUNCE_MS) {
-      pressed = true;
+  // ── 1. Artifact rejection ─────────────────────────────────────────────────
+  double peakMag = 0;
+  for (int i = 2; i < 241; i++)
+    if (vReal[i] > peakMag) peakMag = vReal[i];
+  if (peakMag > ARTIFACT_PEAK_THRESHOLD) return;  // discard noisy frame
+
+  // ── 2. Dominant peak frequency (for display) ──────────────────────────────
+  int peakBin = 2;
+  for (int i = 2; i < 241; i++)
+    if (vReal[i] > vReal[peakBin]) peakBin = i;
+  gFreq = (float)peakBin * SAMPLING_FREQ / (float)SAMPLES;
+
+  // ── 3. Compute per-band power for this frame ──────────────────────────────
+  double framePow[NUM_BANDS] = {0};
+  for (uint8_t b = 0; b < NUM_BANDS; b++) {
+    for (uint16_t bin = BAND_BIN_LO[b]; bin < BAND_BIN_HI[b]; bin++) {
+      double m = vReal[bin];
+      framePow[b] += m * m;
     }
   }
 
-  if (reading != prevBtnState[idx]) {
-    lastBtnChange[idx] = millis();
+  // ── 4. Store in rolling window ────────────────────────────────────────────
+  for (uint8_t b = 0; b < NUM_BANDS; b++)
+    bandWindow[winIdx][b] = framePow[b];
+  winIdx = (winIdx + 1) % WIN_SIZE;
+  if (winFilled < WIN_SIZE) winFilled++;
+
+  // ── 5. Accumulate window power ────────────────────────────────────────────
+  double cumPow[NUM_BANDS] = {0};
+  double totalPow = 0;
+  for (uint8_t f = 0; f < winFilled; f++)
+    for (uint8_t b = 0; b < NUM_BANDS; b++) {
+      cumPow[b] += bandWindow[f][b];
+      totalPow  += bandWindow[f][b];
+    }
+
+  if (totalPow < 1e-6) return;
+
+  // ── 6. Find winning band ──────────────────────────────────────────────────
+  uint8_t winBand = 0;
+  for (uint8_t b = 1; b < NUM_BANDS; b++)
+    if (cumPow[b] > cumPow[winBand]) winBand = b;
+
+  // Confidence = winning band share of total power
+  uint8_t conf = (uint8_t)constrain((cumPow[winBand] / totalPow) * 100.0, 0, 100);
+
+  // Map band index → state enum (0=Delta→1=Deep ... 4=Gamma→5=Focused)
+  uint8_t newState = winBand + 1;   // bands 0-4 → states 1-5
+
+  // ── 7. Hysteresis gate ────────────────────────────────────────────────────
+  if (newState == candState) {
+    candCount++;
+  } else {
+    candState = newState;
+    candCount = 1;
   }
 
-  prevBtnState[idx] = reading;
+  if (candCount >= HYSTERESIS_N && conf >= CONF_THRESHOLD) {
+    gState = newState;
+    gConf  = conf;
+  } else if (conf < CONF_THRESHOLD) {
+    // Low confidence → report unknown
+    gState = 0;
+    gConf  = conf;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Button handling
+// ─────────────────────────────────────────────────────────────────────────────
+bool btnPressed(int pin, int idx) {
+  bool rd = digitalRead(pin);
+  bool pressed = (rd == LOW && prevBtn[idx] == HIGH &&
+                  millis() - lastBtnMs[idx] > DEBOUNCE_MS);
+  if (rd != prevBtn[idx]) lastBtnMs[idx] = millis();
+  prevBtn[idx] = rd;
   return pressed;
 }
 
 void handleButtons() {
-  if (buttonPressed(BTN_MODE, 0)) {
-    currentMode = (DisplayMode)((currentMode + 1) % MODE_COUNT);
-    currentField = FIELD_ALARM_HOUR;
+  if (btnPressed(BTN_MODE, 0)) {
+    dispMode   = (DispMode)((dispMode + 1) % MODE_COUNT);
+    alarmField = FLD_HOUR;
   }
 
-  if (currentMode == MODE_ALARM) {
-    if (buttonPressed(BTN_SELECT, 3)) {
-      currentField = (AlarmField)((currentField + 1) % FIELD_COUNT);
-    }
+  if (dispMode == MODE_ALARM) {
+    if (btnPressed(BTN_SELECT, 3))
+      alarmField = (AlarmFld)((alarmField + 1) % FLD_COUNT);
 
-    if (buttonPressed(BTN_UP, 1)) {
-      switch (currentField) {
-        case FIELD_ALARM_HOUR: alarm_hour = (alarm_hour + 1) % 24; break;
-        case FIELD_ALARM_MIN:  alarm_min = (alarm_min + 1) % 60; break;
-        case FIELD_BUFFER:     buffer_m = min(buffer_m + 5, 120); break;
+    if (btnPressed(BTN_UP, 1)) {
+      switch (alarmField) {
+        case FLD_HOUR: alarmHour   = (alarmHour + 1) % 24; break;
+        case FLD_MIN:  alarmMin    = (alarmMin  + 1) % 60; break;
+        case FLD_BUF:  bufferMin   = min(bufferMin + 5, 120); break;
         default: break;
       }
-      recalcAlarmMinutes();
-      sendAlarmToUNOQ();
     }
 
-    if (buttonPressed(BTN_DOWN, 2)) {
-      switch (currentField) {
-        case FIELD_ALARM_HOUR: alarm_hour = (alarm_hour - 1 + 24) % 24; break;
-        case FIELD_ALARM_MIN:  alarm_min = (alarm_min - 1 + 60) % 60; break;
-        case FIELD_BUFFER:     buffer_m = max(buffer_m - 5, 5); break;
+    if (btnPressed(BTN_DOWN, 2)) {
+      switch (alarmField) {
+        case FLD_HOUR: alarmHour   = (alarmHour + 23) % 24; break;
+        case FLD_MIN:  alarmMin    = (alarmMin  + 59) % 60; break;
+        case FLD_BUF:  bufferMin   = max((int)bufferMin - 5, 5); break;
         default: break;
       }
-      recalcAlarmMinutes();
-      sendAlarmToUNOQ();
     }
   }
 }
 
-void recalcAlarmMinutes() {
-  alarm_m = alarm_hour * 60 + alarm_min;
-}
-
-void sendAlarmToUNOQ() {
-  Serial1.print("SET_ALARM:");
-  Serial1.print(alarm_m);
-  Serial1.print(",");
-  Serial1.println(buffer_m);
-}
-
-// ============================================================================
-// OLED DISPLAY
-// ============================================================================
-void updateDisplay() {
+// ─────────────────────────────────────────────────────────────────────────────
+// OLED display  (no time — time lives on R3 LCD)
+// ─────────────────────────────────────────────────────────────────────────────
+void updateOLED() {
   display.clearDisplay();
-  DateTime now = rtc.now();
 
-  switch (currentMode) {
-    case MODE_TIME:  drawTimeMode(now); break;
-    case MODE_STATE: drawStateMode(now); break;
-    case MODE_ALARM: drawAlarmMode(); break;
-    default: break;
-  }
+  if (dispMode == MODE_STATE) drawStateScreen();
+  else                        drawAlarmScreen();
 
-  display.drawLine(0, 56, 127, 56, SSD1306_WHITE);
+  // Bottom tab bar
+  display.drawLine(0, 55, 127, 55, SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(0, 58);
-  display.print(currentMode == MODE_TIME  ? ">TIME" : " TIME");
-  display.setCursor(42, 58);
-  display.print(currentMode == MODE_STATE ? ">STATE" : " STATE");
-  display.setCursor(88, 58);
-  display.print(currentMode == MODE_ALARM ? ">ALM" : " ALM");
+  display.setCursor(8,  57); display.print(dispMode == MODE_STATE ? F(">STATE") : F(" STATE"));
+  display.setCursor(76, 57); display.print(dispMode == MODE_ALARM ? F(">ALARM") : F(" ALARM"));
 
   display.display();
 }
 
-void drawTimeMode(DateTime now) {
-  display.setTextSize(2);
-  display.setCursor(10, 5);
-  char timeBuf[6];
-  sprintf(timeBuf, "%02d:%02d", now.hour(), now.minute());
-  display.print(timeBuf);
-
-  display.setTextSize(1);
-  display.setCursor(98, 10);
-  char secBuf[4];
-  sprintf(secBuf, ":%02d", now.second());
-  display.print(secBuf);
-
-  display.setCursor(10, 28);
-  char dateBuf[12];
-  sprintf(dateBuf, "%04d-%02d-%02d", now.year(), now.month(), now.day());
-  display.print(dateBuf);
-
-  display.setCursor(10, 42);
-  display.print("Alarm: ");
-  char almBuf[6];
-  sprintf(almBuf, "%02d:%02d", alarm_hour, alarm_min);
-  display.print(almBuf);
-
-  if (alarmRinging) {
-    display.setCursor(90, 42);
-    display.print("RING!");
-  }
-}
-
-void drawStateMode(DateTime now) {
+void drawStateScreen() {
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print("Brain State");
+  display.print(F("Brain State"));
 
+  // Frequency
   display.setTextSize(2);
-  display.setCursor(0, 14);
-  display.print(dominantFreq, 1);
+  display.setCursor(0, 12);
+  display.print(gFreq, 1);
   display.setTextSize(1);
-  display.print(" Hz");
+  display.print(F(" Hz"));
 
-  display.setCursor(0, 34);
-  display.print("Band: ");
-  display.print(currentBand);
+  // Band label
+  display.setCursor(0, 31);
+  display.print(BAND_LBL[gState < 6 ? gState : 0]);
 
-  int barWidth = constrain((int)(dominantFreq * 1.28), 0, 128);
-  display.drawRect(0, 46, 128, 8, SSD1306_WHITE);
-  display.fillRect(0, 46, barWidth, 8, SSD1306_WHITE);
+  // Confidence bar
+  display.setCursor(88, 31);
+  char cbuf[6]; sprintf(cbuf, "%3d%%", gConf);
+  display.print(cbuf);
+
+  int barW = map(gConf, 0, 100, 0, 128);
+  display.drawRect(0, 43, 128, 9, SSD1306_WHITE);
+  display.fillRect(0, 43, barW, 9, SSD1306_WHITE);
 }
 
-void drawAlarmMode() {
+void drawAlarmScreen() {
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print("Alarm Settings");
+  display.print(F("Alarm Settings"));
 
-  display.setCursor(0, 14);
-  display.print("Wake: ");
+  // Alarm time
+  display.setCursor(0, 13);
+  display.print(F("Wake: "));
   display.setTextSize(2);
+  display.setCursor(36, 11);
 
-  if (currentField == FIELD_ALARM_HOUR) {
-    display.setCursor(36, 12);
-    char hBuf[3], mBuf[3];
-    sprintf(hBuf, "%02d", alarm_hour);
-    sprintf(mBuf, "%02d", alarm_min);
-    display.print("["); display.print(hBuf); display.print("]:"); display.print(mBuf);
-  } else if (currentField == FIELD_ALARM_MIN) {
-    display.setCursor(36, 12);
-    char hBuf[3], mBuf[3];
-    sprintf(hBuf, "%02d", alarm_hour);
-    sprintf(mBuf, "%02d", alarm_min);
-    display.print(hBuf); display.print(":["); display.print(mBuf); display.print("]");
+  char hb[3], mb[3];
+  sprintf(hb, "%02d", alarmHour);
+  sprintf(mb, "%02d", alarmMin);
+
+  if (alarmField == FLD_HOUR) {
+    display.print("["); display.print(hb);
+    display.print("]:"); display.print(mb);
+  } else if (alarmField == FLD_MIN) {
+    display.print(hb); display.print(":[");
+    display.print(mb); display.print("]");
   } else {
-    display.setCursor(36, 12);
-    char almBuf[6];
-    sprintf(almBuf, "%02d:%02d", alarm_hour, alarm_min);
-    display.print(almBuf);
+    display.print(hb); display.print(":"); display.print(mb);
   }
 
+  // Buffer
   display.setTextSize(1);
-  display.setCursor(0, 34);
-  if (currentField == FIELD_BUFFER) {
-    display.print("Buffer: ["); display.print(buffer_m); display.print("] min");
+  display.setCursor(0, 32);
+  if (alarmField == FLD_BUF) {
+    display.print(F("Buffer:["));
+    display.print(bufferMin);
+    display.print(F("]min"));
   } else {
-    display.print("Buffer:  "); display.print(buffer_m); display.print("  min");
+    display.print(F("Buffer: "));
+    display.print(bufferMin);
+    display.print(F(" min"));
   }
 
-  display.setCursor(0, 46);
-  display.print("UP/DN:adj SEL:field");
-}
-
-// ============================================================================
-// COMMAND PROCESSING
-// ============================================================================
-void processCommands() {
-  if (Serial1.available() > 0) {
-    String command = Serial1.readStringUntil('\n');
-    command.trim();
-
-    if (command.indexOf("WAKE") >= 0) {
-      alarmRinging = true;
-    }
-    else if (command.indexOf("SET_TIME:") >= 0) {
-      int y, m, d, h, mn, s;
-      sscanf(command.substring(9).c_str(), "%d-%d-%d %d:%d:%d", &y, &m, &d, &h, &mn, &s);
-      rtc.adjust(DateTime(y, m, d, h, mn, s));
-    }
-    else if (command.indexOf("SET_ALARM:") >= 0) {
-      int commaIdx = command.indexOf(',', 10);
-      if (commaIdx > 0) {
-        alarm_m  = command.substring(10, commaIdx).toInt();
-        buffer_m = command.substring(commaIdx + 1).toInt();
-        alarm_hour = alarm_m / 60;
-        alarm_min  = alarm_m % 60;
-      }
-    }
-  }
+  display.setCursor(0, 44);
+  display.print(F("UP/DN adj  SEL:next"));
 }
