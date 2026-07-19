@@ -1,12 +1,154 @@
 # RhythmSleep — EEG Smart Alarm System
 
-A dual-Arduino EEG brainwave monitoring system with smart alarm functionality. The R4 Minima reads EEG signals, runs FFT analysis, and manages the OLED display. The UNO Q (STM32) classifies brainwave bands and its Linux environment runs the Python server for smart alarm logic, MP3 playback, CSV logging, and the web dashboard.
+A **three-Arduino** EEG brainwave monitoring system with smart alarm functionality.
+- The **Arduino UNO R3** owns the RTC and I2C crystal LCD, acting as the I2C master and alarm engine.
+- The **R4 Minima** samples EEG signals, runs an optimized FFT sleep-state algorithm, and drives the OLED + buttons — all as an I2C slave.
+- The **UNO Q** is an I2C slave that bridges data to the Python server via USB Serial for CSV logging and the web dashboard.
 
 ---
 
-## Complete Pinout
+## System Architecture
 
-### Arduino R4 Minima
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Shared I2C Bus (3.3 V level)                 │
+│  SDA ────────────────────────────────────────────────────────   │
+│  SCL ────────────────────────────────────────────────────────   │
+│    │                       │                        │           │
+│    ▼                       ▼                        ▼           │
+│ [R3 MASTER]          [R4 SLAVE 0x08]         [UNO Q SLAVE 0x09] │
+│ PCF8563 RTC          FFT Engine              Python bridge      │
+│ LCD display          OLED + Buttons          USB Serial         │
+│ Alarm logic          EEG input A2            → Python server    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Responsibility Split
+
+| Board | I2C Role | Key Responsibility |
+|---|---|---|
+| **Arduino UNO R3** | Master | RTC · I2C LCD (time) · Smart alarm · Polls R4 every 2 s |
+| **R4 Minima** | Slave `0x08` | EEG sampling · Optimized FFT · OLED (state+alarm) · Buttons |
+| **UNO Q** | Slave `0x09` | Serial bridge: I2C packets → Python CSV/dashboard |
+
+### Data Flow
+
+```
+EEG Sensor ──[A2]──► R4 Minima
+                       │ Band-power FFT (8-frame window ~32 s)
+                       │ Sleep state + confidence
+                       │ Alarm settings (set via buttons)
+                  ─────[I2C @ 0x08]─────
+                       │
+                       ▼
+                    R3 Master (polls every 2 s)
+                       │ Reads: freq, state, confidence, alarm H/M/buffer
+                       │ Checks: is current time in alarm buffer window?
+                       │ Checks: is sleep state ≥ Light Sleep?
+                       ├── YES → Trigger buzzer + LED
+                       │
+                  ─────[I2C @ 0x09]─────
+                       │
+                       ▼
+                    UNO Q (I2C slave)
+                       │ Formats CSV line / WAKE / SET_ALARM strings
+                  ─────[USB Serial]─────
+                       │
+                       ▼
+                    Python Server
+                       ├── Log to CSV (sleep_log_YYYY-MM-DD.csv)
+                       └── Web dashboard on port 8000
+```
+
+---
+
+## I2C Address Map
+
+| Device | Address | Bus |
+|---|---|---|
+| PCF8563 RTC | `0x51` | Shared (on R3) |
+| LCD I2C backpack (PCF8574) | `0x27` (try `0x3F`) | Shared (on R3) |
+| R4 Minima slave | `0x08` | Shared |
+| UNO Q slave | `0x09` | Shared |
+| SSD1306 OLED | `0x3C` | R4 local Wire1 only |
+
+---
+
+## Complete Wiring
+
+### Shared I2C Bus
+
+All boards share **one I2C bus**. Connect SDA and SCL in parallel across all boards and devices.
+
+```
+                    4.7 kΩ   4.7 kΩ
+3V3 (R4 3V3 pin) ──┤ R ├──┬──┤ R ├──┬──
+                           │         │
+SDA ───────────────────────┴─────────┴──── (all SDA pins)
+SCL ───────────────────────────────────── (all SCL pins)
+```
+
+> ⚠️ **Voltage warning:** The R4 Minima operates at **3.3 V logic**. The UNO R3 and UNO Q operate at **5 V logic**. You **must** use I2C level-shifter modules between the 5 V boards and the R4 Minima on the SDA/SCL lines to avoid damaging the R4. Power the pull-up resistors from the R4's **3V3** pin.
+
+```
+R3 A4 (SDA) ──[level shift]── R4 Minima SDA (Wire/A4)
+R3 A5 (SCL) ──[level shift]── R4 Minima SCL (Wire/A5)
+
+R3 A4 (SDA) ─────────────── UNO Q A4 (SDA)    ← same 5 V side, no shifter needed
+R3 A5 (SCL) ─────────────── UNO Q A5 (SCL)
+
+R3 A4 (SDA) ─────────────── PCF8563 SDA
+R3 A5 (SCL) ─────────────── PCF8563 SCL
+
+R3 A4 (SDA) ─────────────── LCD backpack SDA
+R3 A5 (SCL) ─────────────── LCD backpack SCL
+
+GND ──────────────────────── GND (all boards and modules — common ground)
+```
+
+### R4 Minima — Local OLED Bus (Wire1, NOT on shared bus)
+
+The R4 Minima uses its **second I2C controller (Wire1)** exclusively for the OLED so it can simultaneously act as a slave on Wire.
+
+```
+R4 Minima SDA1 ── SSD1306 OLED SDA
+R4 Minima SCL1 ── SSD1306 OLED SCL
+R4 Minima 3V3  ── OLED VCC
+R4 Minima GND  ── OLED GND
+```
+
+> On the R4 Minima, `Wire1` corresponds to pins **SDA1** and **SCL1** (see the silkscreen on the board).
+
+---
+
+## Pin Reference
+
+### Arduino UNO R3
+
+```
+                    ┌──────────────────┐
+                    │   Arduino UNO R3  │
+                    │                  │
+       LCD SDA ◄───►│ A4  (SDA)        │◄───► PCF8563 SDA
+       LCD SCL ◄───►│ A5  (SCL)        │◄───► PCF8563 SCL
+                    │    (+ to R4/UNO Q via level shifter)
+                    │                  │
+        Buzzer ◄────│ D8               │
+           LED ◄────│ D13              │
+                    │                  │
+                    └──────────────────┘
+```
+
+| Pin | Function | Connection |
+|---|---|---|
+| **A4 (SDA)** | I2C Data — Master | LCD · PCF8563 · R4 slave · UNO Q slave |
+| **A5 (SCL)** | I2C Clock — Master | Same bus |
+| **D8** | Buzzer output | Active buzzer (+) → D8, (−) → GND |
+| **D13** | LED output | LED + 220 Ω → D13, cathode → GND |
+| **5V** | Power | PCF8563 VCC · LCD VCC |
+| **GND** | Ground | All components |
+
+### R4 Minima
 
 ```
                     ┌──────────────────┐
@@ -15,196 +157,241 @@ A dual-Arduino EEG brainwave monitoring system with smart alarm functionality. T
                     │                  │
           EEG In ──►│ A2               │
                     │                  │
-      RTC SDA ◄────►│ SDA (I2C)        │◄────► OLED SDA
-      RTC SCL ◄────►│ SCL (I2C)        │◄────► OLED SCL
+  [Shared bus]      │                  │  [Local OLED bus]
+  R3 Master ◄─────►│ A4/SDA  SDA1 ◄──►│ OLED SDA
+                   ►│ A5/SCL  SCL1 ◄──►│ OLED SCL
                     │                  │
-    BTN_MODE ──────►│ D2 (INPUT_PULLUP)│ ◄── to GND via button
-      BTN_UP ──────►│ D3 (INPUT_PULLUP)│ ◄── to GND via button
-    BTN_DOWN ──────►│ D4 (INPUT_PULLUP)│ ◄── to GND via button
-  BTN_SELECT ──────►│ D5 (INPUT_PULLUP)│ ◄── to GND via button
+     BTN_MODE ─────►│ D2 (INPUT_PULLUP)│
+       BTN_UP ─────►│ D3 (INPUT_PULLUP)│
+     BTN_DOWN ─────►│ D4 (INPUT_PULLUP)│
+    BTN_SELECT ────►│ D5 (INPUT_PULLUP)│
                     │                  │
-      UNO Q RX ◄────│ TX1 (Serial1)    │
-      UNO Q TX ────►│ RX1 (Serial1)    │
-                    │                  │
-       POWER USB ◄──│                  │ 
                     └──────────────────┘
 ```
 
-### Pin Table — R4 Minima
-
 | Pin | Function | Connection | Notes |
-|-----|----------|-----------|-------|
-| **A2** | Analog Input | EEG Sensor output | 12-bit ADC, 256 Hz sampling |
-| **SDA** | I2C Data | PCF8563 RTC + SSD1306 OLED | Shared I2C bus |
-| **SCL** | I2C Clock | PCF8563 RTC + SSD1306 OLED | Shared I2C bus |
-| **D2** | Digital Input | MODE button → GND | INPUT_PULLUP, cycles Time/State/Alarm |
-| **D3** | Digital Input | UP button → GND | INPUT_PULLUP, increments value |
-| **D4** | Digital Input | DOWN button → GND | INPUT_PULLUP, decrements value |
-| **D5** | Digital Input | SELECT button → GND | INPUT_PULLUP, toggles field |
-| **TX1** | Hardware Serial1 TX | UNO Q RX | 115200 baud |
-| **RX1** | Hardware Serial1 RX | UNO Q TX | 115200 baud |
-| **USB** | Hardware Serial | PC / Debug Monitor | 115200 baud |
-| **5V** | Power | RTC VCC, OLED VCC | — |
-| **3.3V** | Power (alt) | Can power OLED if 3.3V variant | — |
-| **GND** | Ground | All components GND | Common ground |
+|---|---|---|---|
+| **A2** | EEG analog input | EEG sensor output | 12-bit ADC, 256 Hz sampling |
+| **A4 / SDA** | I2C slave bus (Wire) | Shared bus ← R3 master | Slave address `0x08` |
+| **A5 / SCL** | I2C slave bus (Wire) | Shared bus ← R3 master | — |
+| **SDA1** | Local I2C master (Wire1) | OLED SDA | OLED only, not shared |
+| **SCL1** | Local I2C master (Wire1) | OLED SCL | OLED only, not shared |
+| **D2** | MODE button | Button → GND | Cycles State/Alarm screens |
+| **D3** | UP button | Button → GND | Increment alarm value |
+| **D4** | DOWN button | Button → GND | Decrement alarm value |
+| **D5** | SELECT button | Button → GND | Next alarm field |
+| **3V3** | 3.3 V output | I2C pull-up resistors | Use for pull-ups on shared bus |
+| **GND** | Ground | All components | Common ground |
 
-### Pin Table — Arduino UNO Q (STM32)
+### Arduino UNO Q
 
-| Pin | Function | Connection | Notes |
-|-----|----------|-----------|-------|
-| **RX** | Hardware Serial1 RX | R4 Minima TX1 | 115200 baud |
-| **TX** | Hardware Serial1 TX | R4 Minima RX1 | 115200 baud |
-| **USB-C** | Serial to Linux | Python server (internal bridge) | — |
-| **Audio Out** | Speaker / 3.5mm | MP3 playback via Linux `mpg123` | — |
+| Pin | Function | Connection |
+|---|---|---|
+| **A4 (SDA)** | I2C slave (Wire) | Shared bus ← R3 master, slave `0x09` |
+| **A5 (SCL)** | I2C slave (Wire) | Shared bus |
+| **USB-C** | Serial to Python | Python server on host/Linux |
+| **GND** | Ground | Common ground |
 
-### PCF8563 RTC Module
+### PCF8563 RTC Module (wired to R3)
 
-| RTC Pin | Connection |
-|---------|-----------|
-| VCC | Minima 5V (or 3.3V) |
-| GND | Minima GND |
-| SDA | Minima SDA |
-| SCL | Minima SCL |
-| INT | Not connected (optional) |
+| RTC Pin | Connect to |
+|---|---|
+| VCC | R3 5V |
+| GND | R3 GND |
+| SDA | R3 A4 |
+| SCL | R3 A5 |
+| INT | Not connected |
 
-### SSD1306 OLED (128×64, I2C)
+### SSD1306 OLED 128×64 (wired to R4 Wire1)
 
-| OLED Pin | Connection |
-|----------|-----------|
-| VCC | Minima 5V (or 3.3V) |
-| GND | Minima GND |
-| SDA | Minima SDA |
-| SCL | Minima SCL |
+| OLED Pin | Connect to |
+|---|---|
+| VCC | R4 3V3 |
+| GND | R4 GND |
+| SDA | R4 **SDA1** |
+| SCL | R4 **SCL1** |
 
-> **Note:** RTC and OLED share the same I2C bus. Default addresses: OLED = `0x3C`, RTC = `0x51`.
+### I2C Crystal LCD 16×2 (wired to R3)
 
-### 4 Tactile Buttons
+| LCD Pin | Connect to |
+|---|---|
+| VCC | R3 5V |
+| GND | R3 GND |
+| SDA | R3 A4 |
+| SCL | R3 A5 |
 
-Each button has one leg connected to the designated pin and the other leg to GND. No external resistors needed (internal pull-ups used).
+> Default I2C address is `0x27`. If the display doesn't initialize, try `0x3F` (change in `r3.ino` line: `LiquidCrystal_I2C lcd(0x27, 16, 2);`).
+
+### 4 Tactile Buttons (on R4 Minima)
 
 ```
-  Pin D2 ──┤ BTN_MODE   ├── GND     (Cycle: Time → State → Alarm)
-  Pin D3 ──┤ BTN_UP     ├── GND     (Increment value in Alarm mode)
-  Pin D4 ──┤ BTN_DOWN   ├── GND     (Decrement value in Alarm mode)
-  Pin D5 ──┤ BTN_SELECT ├── GND     (Toggle alarm field: Hour/Min/Buffer)
+  D2 ──┤ MODE   ├── GND    cycles: State ↔ Alarm screens
+  D3 ──┤ UP     ├── GND    increment selected field
+  D4 ──┤ DOWN   ├── GND    decrement selected field
+  D5 ──┤ SELECT ├── GND    move to next editable field
+```
+
+No resistors needed — internal pull-ups are enabled.
+
+---
+
+## I2C Packet Protocol
+
+### R3 → R4 Minima
+
+| Byte | Value | Meaning |
+|---|---|---|
+| 0 | `0x01` | Request state packet |
+
+### R4 Minima → R3 (10-byte response)
+
+| Bytes | Field |
+|---|---|
+| 0–3 | `float` dominant EEG frequency (Hz) |
+| 4 | Sleep state: `0`=Unknown `1`=Deep `2`=Light `3`=Relaxed `4`=Active `5`=Focused |
+| 5 | Confidence 0–100 (%) |
+| 6 | Alarm hour (0–23) |
+| 7 | Alarm minute (0–59) |
+| 8 | Buffer minutes (5–120) |
+| 9 | Reserved |
+
+### R3 → UNO Q
+
+| Cmd byte | Payload | Effect |
+|---|---|---|
+| `0xA1` | float(4B) + state(1B) + conf(1B) | UNO Q sends CSV line to Python |
+| `0xA2` | none | UNO Q sends `WAKE` to Python |
+| `0xA3` | alarmH + alarmM + buf | UNO Q sends `SET_ALARM:HH:MM,buf` to Python |
+
+### UNO Q → Python (USB Serial)
+
+```
+7.25,Light Sleep,72       ← freq, band, confidence
+WAKE
+SET_ALARM:06:00,30
 ```
 
 ---
 
-## Architecture & Data Flow
+## Optimized FFT Algorithm (R4 Minima)
+
+The new algorithm replaces single-peak detection with a **weighted band-power accumulator**:
+
+1. **Frame**: 1024 samples @ 256 Hz = **4 seconds** of EEG
+2. **Hamming window** applied before FFT
+3. **Artifact rejection**: frames where peak magnitude > 3500 ADC counts are discarded entirely
+4. **Per-band power**: sum of squared magnitudes across all bins in each band
+
+| Band | Hz | Bins | → State |
+|---|---|---|---|
+| Delta | 0.5–4 | 2–16 | Deep Sleep |
+| Theta | 4–8 | 16–32 | Light Sleep |
+| Alpha | 8–12 | 32–48 | Relaxed |
+| Beta | 12–30 | 48–120 | Active |
+| Gamma | 30–60 | 120–240 | Focused |
+
+5. **Sliding window**: 8 frames (~32 s) of per-band power accumulated
+6. **Winner**: band with highest cumulative power across the window
+7. **Confidence**: winner's share of total power × 100 (%)
+8. **Hysteresis gate**: state only changes after **3 consecutive matching windows** with confidence **≥ 40%**
+
+---
+
+## Smart Alarm Logic (R3)
+
+1. User sets **alarm time** (HH:MM) and **buffer** (5–120 min) via OLED buttons on the R4 Minima
+2. R3 polls R4 every 2 s for the current sleep state, confidence, and alarm settings
+3. **Buffer window** = `[alarm_time − buffer, alarm_time]`
+4. During the buffer window:
+   - If `sleepState ≥ 2` (Light Sleep, Relaxed, Active, or Focused) **AND** `confidence ≥ 35%` → alarm fires immediately
+   - If sleep state is Deep Sleep, alarm waits for a lighter moment
+5. At **exact alarm time**: alarm fires unconditionally regardless of sleep state
+6. Alarm auto-dismisses after **2 minutes**
+7. On trigger: buzzer (D8) + LED (D13) alternate at 400 ms; `WAKE` sent to UNO Q → Python
+
+---
+
+## OLED Display Modes (R4 Minima)
+
+> Time is no longer shown on the OLED — it is displayed on the R3 LCD.
+
+Cycle screens using the **MODE** button (D2):
+
+| Screen | Content | Button Actions |
+|---|---|---|
+| **STATE** | Dominant frequency (Hz) · Band label · Confidence bar | — |
+| **ALARM** | Editable alarm HH:MM · Buffer minutes | UP/DOWN adjust · SELECT next field |
+
+---
+
+## LCD Display (R3 — always on)
 
 ```
-EEG Sensor ──[A2]──► R4 Minima (data acquisition only)
-                      │
-                      ├── FFT (1024 samples, 256 Hz)
-                      ├── Extract dominant frequency (0.5–100 Hz)
-                      ├── Send "FREQ:XX.XX" via Serial1
-                      ├── Display on OLED (3 modes)
-                      └── Forward alarm settings from buttons
-                      │
-              ────[TX1/RX1]────
-                      │
-                      ▼
-                   UNO Q STM32 (classifier + relay)
-                      │
-                      ├── Parse FREQ:XX.XX
-                      ├── Classify brainwave band
-                      ├── Output "FREQ,Band" to Linux Serial
-                      └── Relay commands both directions
-                      │
-              ────[USB-C Internal]────
-                      │
-                      ▼
-               Python Server (on UNO Q Linux)
-                      │
-                      ├── Log to CSV (sleep_log_YYYY-MM-DD.csv)
-                      ├── Smart alarm logic (rolling 30s window)
-                      ├── MP3 playback via mpg123
-                      ├── Sends WAKE → UNO Q → Minima OLED
-                      └── Web dashboard on port 8000
+┌────────────────┐
+│ 06:32:14 A06:00│   ← current time + alarm time
+│ LtSleep    72% │   ← sleep state + confidence
+└────────────────┘
 ```
 
-### Responsibility Split
-
-| Component | Role |
-|-----------|------|
-| **R4 Minima** | FFT + dominant frequency + OLED display + button input. No alarm logic. |
-| **UNO Q STM32** | Classify frequency into brainwave band + bidirectional relay |
-| **Python Server (UNO Q Linux)** | CSV logging + smart alarm + MP3 playback + web dashboard |
+When alarm is ringing:
+```
+┌────────────────┐
+│ 06:00:03  WAKE!│
+│ Relaxed    81% │
+└────────────────┘
+```
 
 ---
 
 ## Brainwave Classification
 
-| Band | Frequency Range | State Label | Description |
-|------|----------------|-------------|-------------|
-| **Gamma** | 30–100 Hz | Focused | High cognitive activity |
+| Band | Frequency | State | Description |
+|---|---|---|---|
+| **Gamma** | 30–60 Hz | Focused | High cognitive activity |
 | **Beta** | 12–30 Hz | Active | Alert, engaged |
 | **Alpha** | 8–12 Hz | Relaxed | Calm, resting |
-| **Theta** | 4–8 Hz | Light Sleep | Drowsy, light sleep |
+| **Theta** | 4–8 Hz | Light Sleep | Drowsy, transitional |
 | **Delta** | 0.5–4 Hz | Deep Sleep | Deep restorative sleep |
-
----
-
-## OLED Display Modes
-
-Cycle through modes using the **MODE** button (D2):
-
-| Mode | Screen Content | Button Actions |
-|------|---------------|----------------|
-| **Time** | Large clock (HH:MM:SS), date, alarm time | — |
-| **State** | Dominant frequency (Hz), band name, visual bar | — |
-| **Alarm** | Alarm hour/minute editor, buffer editor | UP/DOWN adjust, SELECT toggles field |
-
----
-
-## Smart Alarm Logic (runs on Python server)
-
-1. User sets **alarm time** (hour:minute) and **buffer** (minutes) via OLED buttons or web UI
-2. During the alarm window `[alarm - buffer, alarm + buffer]`:
-   - System tracks the **highest frequency** over a rolling 30-second window
-   - When dominant freq matches the highest (within ±5 Hz) for **≥5 seconds** → plays `openingtone.mp3` via `mpg123`
-   - If frequency remains stable (±5 Hz) → plays `alarm.mp3` on loop
-3. **Failsafe**: If the end of the buffer window is reached, alarm fires regardless
-4. When alarm fires, Python sends `WAKE` to Minima → OLED shows "RING!"
 
 ---
 
 ## Setup Instructions
 
 ### 1. Install Arduino Libraries
-Via Arduino Library Manager, install:
-- `RTClib` (Adafruit)
-- `arduinoFFT`
-- `Adafruit SSD1306`
-- `Adafruit GFX Library`
+
+Via **Arduino Library Manager**, install:
+
+| Library | Used by |
+|---|---|
+| `RTClib` (Adafruit) | R3 |
+| `LiquidCrystal I2C` (Frank de Brabander) | R3 |
+| `Adafruit SSD1306` | R4 Minima |
+| `Adafruit GFX Library` | R4 Minima |
+| `arduinoFFT` | R4 Minima |
 
 ### 2. Upload Firmware
-1. Upload `r4Minina/EECreader.ino` to the Arduino R4 Minima
-2. Upload `UNOQ/data_relayer.ino` to the UNO Q STM32 (via Arduino IDE)
 
-### 3. Connect Hardware
-Wire all components per the pinout tables above. Ensure common GND between all.
+| File | Upload to |
+|---|---|
+| `r3.ino` | Arduino UNO R3 |
+| `r4Minina/r4minima.ino` | Arduino R4 Minima |
+| `UNOQ/data_relayer.ino` | UNO Q |
 
-### 4. Place MP3 Files on UNO Q
-Copy to the RhythmSleep directory on UNO Q's Linux filesystem:
-- `openingtone.mp3` — played after 5 seconds of high frequency
-- `alarm.mp3` — played on loop when alarm triggers
+### 3. Wire Hardware
 
-### 5. Install mpg123 on UNO Q
+Follow the pinout tables and wiring diagram above. Ensure:
+- Common GND across all boards
+- Level shifters on SDA/SCL between R3/UNO Q (5 V) and R4 Minima (3.3 V)
+- Pull-up resistors (4.7 kΩ × 2) on SDA and SCL, tied to R4 Minima's **3V3**
+
+### 4. Run Python Server
+
 ```bash
-apt-get install mpg123
-```
-
-### 6. Run Server
-```bash
-# Connect to UNO Q via ADB or SSH
-adb shell
-cd RhythmSleep
 sudo python3 eeg_server.py
 ```
 
-### 7. Open Dashboard
+### 5. Open Dashboard
+
 Navigate to `http://<device-ip>:8000` in your browser.
 
 ---
@@ -214,10 +401,10 @@ Navigate to `http://<device-ip>:8000` in your browser.
 Files are saved as `sleep_log_YYYY-MM-DD.csv`:
 
 ```csv
-Timestamp,Frequency,State
-2026-06-28 23:15:01,2.50,Deep Sleep
-2026-06-28 23:15:05,5.75,Light Sleep
-2026-06-28 23:15:09,9.00,Relaxed
+Timestamp,Frequency,State,Confidence
+2026-07-19 23:15:01,2.50,Deep Sleep,78
+2026-07-19 23:15:05,5.75,Light Sleep,64
+2026-07-19 23:15:09,9.00,Relaxed,71
 ```
 
 ---
@@ -225,7 +412,7 @@ Timestamp,Frequency,State
 ## API Endpoints
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+|---|---|---|
 | `/api/files` | GET | List all CSV log files |
 | `/api/data?file=X` | GET | Get timestamps, frequencies, states from a CSV file |
 | `/api/live` | GET | Current frequency, state, alarm status (real-time) |
