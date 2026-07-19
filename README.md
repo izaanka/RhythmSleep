@@ -91,8 +91,8 @@ SCL ─────────────────────────�
 > ⚠️ **Voltage warning:** The R4 Minima operates at **3.3 V logic**. The UNO R3 and UNO Q operate at **5 V logic**. You **must** use I2C level-shifter modules between the 5 V boards and the R4 Minima on the SDA/SCL lines to avoid damaging the R4. Power the pull-up resistors from the R4's **3V3** pin.
 
 ```
-R3 A4 (SDA) ──[level shift]── R4 Minima SDA (Wire/A4)
-R3 A5 (SCL) ──[level shift]── R4 Minima SCL (Wire/A5)
+R3 A4 (SDA) ──[level shift]── R4 Minima A4 (SDA / Wire slave)
+R3 A5 (SCL) ──[level shift]── R4 Minima A5 (SCL / Wire slave)
 
 R3 A4 (SDA) ─────────────── UNO Q A4 (SDA)    ← same 5 V side, no shifter needed
 R3 A5 (SCL) ─────────────── UNO Q A5 (SCL)
@@ -106,18 +106,21 @@ R3 A5 (SCL) ─────────────── LCD backpack SCL
 GND ──────────────────────── GND (all boards and modules — common ground)
 ```
 
-### R4 Minima — Local OLED Bus (Wire1, NOT on shared bus)
+### R4 Minima — OLED via SPI (separate from I2C bus)
 
-The R4 Minima uses its **second I2C controller (Wire1)** exclusively for the OLED so it can simultaneously act as a slave on Wire.
+The R4 Minima Arduino core does not expose `Wire1`. To avoid a bus conflict (the OLED can't share `Wire` while `Wire` is a slave), the OLED is wired via **hardware SPI** instead of I2C. Rewire an I2C OLED module to SPI, or use a module that has both interfaces.
 
 ```
-R4 Minima SDA1 ── SSD1306 OLED SDA
-R4 Minima SCL1 ── SSD1306 OLED SCL
-R4 Minima 3V3  ── OLED VCC
-R4 Minima GND  ── OLED GND
+R4 Minima D11 (MOSI) ── OLED SDA/MOSI pin
+R4 Minima D13 (SCK)  ── OLED SCL/CLK pin
+R4 Minima D10        ── OLED CS  pin
+R4 Minima D9         ── OLED DC  pin
+R4 Minima D8         ── OLED RST pin
+R4 Minima 3V3        ── OLED VCC
+R4 Minima GND        ── OLED GND
 ```
 
-> On the R4 Minima, `Wire1` corresponds to pins **SDA1** and **SCL1** (see the silkscreen on the board).
+> SSD1306 modules labelled "4-pin I2C" are I2C-only. Use a **7-pin SSD1306 SPI module** (has CS, DC, RST, MOSI, CLK, VCC, GND pins).
 
 ---
 
